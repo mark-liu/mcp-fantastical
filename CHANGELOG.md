@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-27
+
+### Added
+- Native EventKit helper (`native/FantasticalHelper.swift`) for fast, reliable calendar access
+- Fallback mechanism: tries EventKit helper first, falls back to AppleScript if unavailable
+- Build script for native helper (`npm run build:native`)
+
+### Fixed
+- Calendar permission errors (-1743) when running in MCP subprocess contexts (#2)
+- Timeouts on large calendars (3000+ events) due to slow AppleScript `whose` filters
+- Stale repository references from old GitHub username (#1)
+
+### Changed
+- `fantastical_get_today`, `fantastical_get_upcoming`, `fantastical_get_calendars` now use EventKit by default
+- Updated README with Full Calendar Access permission requirements and troubleshooting
+
+Based on [PR #5](https://github.com/aplaceforallmystuff/mcp-fantastical/pull/5) by [@pdurlej](https://github.com/pdurlej) and [PR #1](https://github.com/aplaceforallmystuff/mcp-fantastical/pull/1) by [@jcbmrrs](https://github.com/jcbmrrs).
+
 ## [1.0.3] - 2025-11-29
 
 ### Fixed
