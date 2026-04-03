@@ -2,13 +2,17 @@
 /**
  * MCP Server for Fantastical Calendar
  *
- * Provides calendar management through Fantastical's AppleScript interface.
- * Leverages Fantastical's powerful natural language parsing for event creation.
+ * Provides calendar management through Fantastical's AppleScript interface
+ * and Apple Calendar.app for CRUD operations.
+ *
+ * Fork: mark-liu/mcp-fantastical
+ * Upstream: aplaceforallmystuff/mcp-fantastical
+ * Fork fixes: calendar CRUD, encoding fix (parse sentence), calendar filter, notes field
  *
  * Requirements:
  * - macOS only
- * - Fantastical installed
- * - Accessibility permissions for osascript
+ * - Fantastical installed (for event creation via natural language)
+ * - Calendar.app (for reads, deletes, updates — ships with macOS)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -23,7 +27,7 @@ import { promisify } from "util";
 
 const execAsync = promisify(exec);
 
-// Helper to run AppleScript
+// Helper to run single-line AppleScript
 async function runAppleScript(script: string): Promise<string> {
   try {
     const { stdout, stderr } = await execAsync(`osascript -e '${script.replace(/'/g, "'\\''")}'`);
@@ -39,16 +43,23 @@ async function runAppleScript(script: string): Promise<string> {
   }
 }
 
-// Helper to run multi-line AppleScript
-async function runAppleScriptMultiline(script: string): Promise<string> {
+// Helper to run multi-line AppleScript via temp file (avoids shell escaping issues)
+async function runAppleScriptFile(script: string): Promise<string> {
   try {
-    // Write script to temp file and execute
-    const escapedScript = script.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    const { stdout, stderr } = await execAsync(`osascript -e "${escapedScript}"`);
-    if (stderr && !stdout) {
-      throw new Error(stderr);
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    const tmpFile = path.join(os.tmpdir(), `mcp-fantastical-${Date.now()}.scpt`);
+    fs.writeFileSync(tmpFile, script);
+    try {
+      const { stdout, stderr } = await execAsync(`osascript "${tmpFile}"`, { timeout: 15000 });
+      if (stderr && !stdout) {
+        throw new Error(stderr);
+      }
+      return stdout.trim();
+    } finally {
+      fs.unlinkSync(tmpFile);
     }
-    return stdout.trim();
   } catch (error) {
     if (error instanceof Error) {
       throw new Error(`AppleScript error: ${error.message}`);
@@ -57,21 +68,11 @@ async function runAppleScriptMultiline(script: string): Promise<string> {
   }
 }
 
-// Check if Fantastical is installed
-async function checkFantasticalInstalled(): Promise<boolean> {
-  try {
-    await runAppleScript('tell application "System Events" to return exists (processes where name is "Fantastical")');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // Tool definitions
 const TOOLS: Tool[] = [
   {
     name: "fantastical_create_event",
-    description: "Create a calendar event using Fantastical's natural language parsing. Examples: 'Meeting with John tomorrow at 3pm', 'Dentist appointment Friday 10am', 'Call with team every Monday at 9am'",
+    description: "Create a calendar event using Fantastical's natural language parsing. Examples: 'Meeting with John tomorrow at 3pm', 'Dentist appointment Friday 10am', 'Call with team every Monday at 9am'. Use /CalendarName at the end of the sentence to target a specific calendar.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -81,7 +82,7 @@ const TOOLS: Tool[] = [
         },
         calendar: {
           type: "string",
-          description: "Optional: Target calendar name (e.g., 'Work', 'Personal')",
+          description: "Optional: Target calendar name (e.g., 'Work', 'Personal', 'Claude'). Appended as /CalendarName to the sentence.",
         },
         notes: {
           type: "string",
@@ -97,22 +98,31 @@ const TOOLS: Tool[] = [
   },
   {
     name: "fantastical_get_today",
-    description: "Get today's calendar events from Fantastical",
+    description: "Get today's calendar events. Optionally filter by calendar name. Returns event titles, times, locations, and notes.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        calendar: {
+          type: "string",
+          description: "Optional: Filter events to a specific calendar (e.g., 'Claude', 'Work')",
+        },
+      },
       required: [],
     },
   },
   {
     name: "fantastical_get_upcoming",
-    description: "Get upcoming calendar events from Fantastical",
+    description: "Get upcoming calendar events. Optionally filter by calendar name. Returns event titles, times, locations, and notes.",
     inputSchema: {
       type: "object" as const,
       properties: {
         days: {
           type: "number",
           description: "Number of days to look ahead (default: 7)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Filter events to a specific calendar (e.g., 'Claude', 'Work')",
         },
       },
       required: [],
@@ -134,7 +144,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "fantastical_get_calendars",
-    description: "List all available calendars in Fantastical",
+    description: "List all available calendars with their IDs and writable status",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -143,7 +153,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "fantastical_search",
-    description: "Search for events by text in Fantastical",
+    description: "Search for events by text in Fantastical. Opens Fantastical's search UI.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -155,13 +165,76 @@ const TOOLS: Tool[] = [
       required: ["query"],
     },
   },
+  // --- New tools (fork additions) ---
+  {
+    name: "fantastical_create_calendar",
+    description: "Create a new calendar in Apple Calendar. Creates on iCloud if available, otherwise locally.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name for the new calendar (e.g., 'Claude', 'Projects')",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "fantastical_delete_event",
+    description: "Delete calendar events matching a title pattern. Optionally filter by calendar and date.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title_contains: {
+          type: "string",
+          description: "Text that the event title must contain (case-sensitive match)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Only delete from this calendar",
+        },
+        date: {
+          type: "string",
+          description: "Optional: Only delete events on this date (YYYY-MM-DD format)",
+        },
+      },
+      required: ["title_contains"],
+    },
+  },
+  {
+    name: "fantastical_update_event",
+    description: "Update properties of a calendar event matched by title. Optionally filter by calendar.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title_contains: {
+          type: "string",
+          description: "Text that the event title must contain (matches first found)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Only match events in this calendar",
+        },
+        new_title: {
+          type: "string",
+          description: "Optional: New title for the event",
+        },
+        new_notes: {
+          type: "string",
+          description: "Optional: New notes/description for the event",
+        },
+      },
+      required: ["title_contains"],
+    },
+  },
 ];
 
 // Create server instance
 const server = new Server(
   {
     name: "mcp-fantastical",
-    version: "1.0.0",
+    version: "1.2.0",
   },
   {
     capabilities: {
@@ -174,6 +247,64 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return { tools: TOOLS };
 });
+
+// Build AppleScript for reading events with optional calendar filter and notes
+function buildEventQueryScript(calFilter: string | undefined, dateRangeSetup: string): string {
+  const calBlock = calFilter
+    ? `tell calendar "${calFilter.replace(/"/g, '\\"')}"\n`
+    : `repeat with cal in calendars\n    set calName to name of cal\n    tell cal\n`;
+  const calBlockEnd = calFilter
+    ? `end tell`
+    : `end tell\n  end repeat`;
+  const calNameExpr = calFilter
+    ? `"${calFilter.replace(/"/g, '\\"')}"`
+    : `calName`;
+
+  return `set output to ""
+${dateRangeSetup}
+tell application "Calendar"
+  ${calBlock}    try
+      set calEvents to (every event whose start date >= rangeStart and start date < rangeEnd)
+      repeat with evt in calEvents
+        set evtTitle to summary of evt
+        set evtStart to start date of evt
+        set evtEnd to end date of evt
+        set evtLoc to ""
+        try
+          set evtLoc to location of evt
+        end try
+        set evtNotes to ""
+        try
+          set evtNotes to description of evt
+        on error
+          set evtNotes to ""
+        end try
+        set output to output & ${calNameExpr} & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "|" & evtNotes & return
+      end repeat
+    end try
+  ${calBlockEnd}
+end tell
+return output`;
+}
+
+// Parse pipe-delimited event output into structured objects
+function parseEventOutput(result: string) {
+  return result
+    .split("\n")
+    .filter(line => line.trim())
+    .map(line => {
+      const parts = line.split("|");
+      return {
+        calendar: parts[0] || "",
+        title: parts[1] || "",
+        start: parts[2] || "",
+        end: parts[3] || "",
+        location: parts[4] || "",
+        notes: parts[5] || "",
+      };
+    })
+    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+}
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -189,23 +320,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           addImmediately?: boolean;
         };
 
-        // Build URL with parameters
-        const params = new URLSearchParams();
-        params.append("s", sentence);
-        if (addImmediately) {
-          params.append("add", "1");
-        }
-        if (calendar) {
-          params.append("calendarName", calendar);
-        }
+        // Use Fantastical AppleScript 'parse sentence' instead of URL scheme
+        // to avoid URLSearchParams encoding spaces as '+' (Fantastical bug)
+        const calHint = calendar ? ` /${calendar}` : "";
+        const escapedSentence = (sentence + calHint).replace(/"/g, '\\"');
+        const addFlag = addImmediately ? " with add immediately" : "";
+
+        let script: string;
         if (notes) {
-          params.append("n", notes);
+          const escapedNotes = notes.replace(/"/g, '\\"');
+          script = `tell application "Fantastical"
+  parse sentence "${escapedSentence}" notes "${escapedNotes}"${addFlag}
+end tell`;
+        } else {
+          script = `tell application "Fantastical" to parse sentence "${escapedSentence}"${addFlag}`;
         }
 
-        const url = `x-fantastical3://parse?${params.toString()}`;
-        const script = `do shell script "open '${url}'"`;
-
-        await runAppleScript(script);
+        await runAppleScriptFile(script);
 
         return {
           content: [{
@@ -221,42 +352,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "fantastical_get_today": {
-        // Get events using Calendar app (Fantastical syncs with it)
-        // Use current date as reference to avoid locale parsing issues
-        const script = `
-set output to ""
-set todayStart to current date
-set hours of todayStart to 0
-set minutes of todayStart to 0
-set seconds of todayStart to 0
-set todayEnd to todayStart + (1 * days)
+        const { calendar: calFilter } = args as { calendar?: string };
 
-tell application "Calendar"
-  repeat with cal in calendars
-    set calName to name of cal
-    try
-      set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
-      repeat with evt in calEvents
-        set evtTitle to summary of evt
-        set evtStart to start date of evt
-        set evtEnd to end date of evt
-        set evtLoc to location of evt
-        set output to output & calName & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "\\n"
-      end repeat
-    end try
-  end repeat
-end tell
-return output`;
+        const dateSetup = `set rangeStart to current date
+set hours of rangeStart to 0
+set minutes of rangeStart to 0
+set seconds of rangeStart to 0
+set rangeEnd to rangeStart + (1 * days)`;
 
-        const result = await runAppleScriptMultiline(script);
-        const events = result
-          .split("\n")
-          .filter(line => line.trim())
-          .map(line => {
-            const [calendar, title, start, end, location] = line.split("|");
-            return { calendar, title, start, end, location: location || "" };
-          })
-          .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+        const script = buildEventQueryScript(calFilter, dateSetup);
+        const result = await runAppleScriptFile(script);
+        const events = parseEventOutput(result);
 
         return {
           content: [{
@@ -264,6 +370,7 @@ return output`;
             text: JSON.stringify({
               date: new Date().toISOString().split("T")[0],
               count: events.length,
+              calendar_filter: calFilter || null,
               events,
             }, null, 2),
           }],
@@ -271,45 +378,19 @@ return output`;
       }
 
       case "fantastical_get_upcoming": {
-        const { days = 7 } = args as { days?: number };
-
+        const { days = 7, calendar: calFilter } = args as { days?: number; calendar?: string };
         const today = new Date();
         const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() + days);
 
-        const script = `
-set output to ""
-set rangeStart to current date
+        const dateSetup = `set rangeStart to current date
 set hours of rangeStart to 0
 set minutes of rangeStart to 0
 set seconds of rangeStart to 0
-set rangeEnd to rangeStart + (${days} * days)
+set rangeEnd to rangeStart + (${days} * days)`;
 
-tell application "Calendar"
-  repeat with cal in calendars
-    set calName to name of cal
-    try
-      set calEvents to (every event of cal whose start date >= rangeStart and start date < rangeEnd)
-      repeat with evt in calEvents
-        set evtTitle to summary of evt
-        set evtStart to start date of evt
-        set evtEnd to end date of evt
-        set evtLoc to location of evt
-        set output to output & calName & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "\\n"
-      end repeat
-    end try
-  end repeat
-end tell
-return output`;
-
-        const result = await runAppleScriptMultiline(script);
-        const events = result
-          .split("\n")
-          .filter(line => line.trim())
-          .map(line => {
-            const [calendar, title, start, end, location] = line.split("|");
-            return { calendar, title, start, end, location: location || "" };
-          })
-          .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+        const script = buildEventQueryScript(calFilter, dateSetup);
+        const result = await runAppleScriptFile(script);
+        const events = parseEventOutput(result);
 
         return {
           content: [{
@@ -321,6 +402,7 @@ return output`;
                 days,
               },
               count: events.length,
+              calendar_filter: calFilter || null,
               events,
             }, null, 2),
           }],
@@ -329,8 +411,6 @@ return output`;
 
       case "fantastical_show_date": {
         const { date } = args as { date: string };
-
-        // Use URL scheme to show date in Fantastical
         const script = `do shell script "open 'x-fantastical3://show/calendar/${encodeURIComponent(date)}'"`;
         await runAppleScript(script);
 
@@ -346,22 +426,25 @@ return output`;
       }
 
       case "fantastical_get_calendars": {
-        const script = `
-set output to ""
+        const script = `set output to ""
 tell application "Calendar"
   repeat with cal in calendars
     set calName to name of cal
-    set calColor to color of cal
-    set output to output & calName & "\\n"
+    set calId to uid of cal
+    set calWritable to writable of cal
+    set output to output & calName & "|" & calId & "|" & calWritable & return
   end repeat
 end tell
 return output`;
 
-        const result = await runAppleScriptMultiline(script);
+        const result = await runAppleScriptFile(script);
         const calendars = result
           .split("\n")
           .filter(line => line.trim())
-          .map(name => ({ name }));
+          .map(line => {
+            const [calName, id, writable] = line.split("|");
+            return { name: calName, id, writable: writable === "true" };
+          });
 
         return {
           content: [{
@@ -376,8 +459,6 @@ return output`;
 
       case "fantastical_search": {
         const { query } = args as { query: string };
-
-        // Search using URL scheme which opens Fantastical's search
         const script = `do shell script "open 'x-fantastical3://search?query=${encodeURIComponent(query)}'"`;
         await runAppleScript(script);
 
@@ -387,6 +468,187 @@ return output`;
             text: JSON.stringify({
               success: true,
               message: `Opened Fantastical search for: "${query}"`,
+            }, null, 2),
+          }],
+        };
+      }
+
+      // --- New tools (fork additions) ---
+
+      case "fantastical_create_calendar": {
+        const { name: calName } = args as { name: string };
+        const escapedName = calName.replace(/"/g, '\\"');
+
+        // Check if calendar already exists
+        const checkScript = `tell application "Calendar"
+  try
+    set c to calendar "${escapedName}"
+    return "EXISTS|" & uid of c
+  on error
+    return "NOT_FOUND"
+  end try
+end tell`;
+        const checkResult = await runAppleScriptFile(checkScript);
+
+        if (checkResult.startsWith("EXISTS")) {
+          const existingId = checkResult.split("|")[1];
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: true,
+                message: `Calendar "${calName}" already exists`,
+                calendarId: existingId,
+                created: false,
+              }, null, 2),
+            }],
+          };
+        }
+
+        // Create via Calendar.app AppleScript (creates on default account)
+        const createScript = `tell application "Calendar"
+  set newCal to make new calendar with properties {name:"${escapedName}"}
+  return uid of newCal
+end tell`;
+        const calId = await runAppleScriptFile(createScript);
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              message: `Calendar "${calName}" created`,
+              calendarId: calId,
+              created: true,
+            }, null, 2),
+          }],
+        };
+      }
+
+      case "fantastical_delete_event": {
+        const { title_contains, calendar: calFilter, date } = args as {
+          title_contains: string;
+          calendar?: string;
+          date?: string;
+        };
+
+        const escapedTitle = title_contains.replace(/"/g, '\\"');
+        let dateFilter = "";
+        if (date) {
+          // Parse YYYY-MM-DD and create date bounds
+          dateFilter = `
+set filterDate to current date
+set year of filterDate to ${parseInt(date.substring(0, 4))}
+set month of filterDate to ${parseInt(date.substring(5, 7))}
+set day of filterDate to ${parseInt(date.substring(8, 10))}
+set hours of filterDate to 0
+set minutes of filterDate to 0
+set seconds of filterDate to 0
+set filterEnd to filterDate + (1 * days)`;
+        }
+
+        const calTarget = calFilter
+          ? `calendar "${calFilter.replace(/"/g, '\\"')}"`
+          : "every calendar";
+
+        const dateCondition = date
+          ? ` and start date >= filterDate and start date < filterEnd`
+          : "";
+
+        const script = `set deletedCount to 0
+${dateFilter}
+tell application "Calendar"
+  ${calFilter ? `tell ${calTarget}` : `repeat with cal in calendars\n    tell cal`}
+    try
+      set matchingEvents to (every event whose summary contains "${escapedTitle}"${dateCondition})
+      set deletedCount to deletedCount + (count of matchingEvents)
+      repeat with evt in matchingEvents
+        delete evt
+      end repeat
+    end try
+  ${calFilter ? `end tell` : `end tell\n  end repeat`}
+  save
+end tell
+return deletedCount`;
+
+        const result = await runAppleScriptFile(script);
+        const count = parseInt(result) || 0;
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: true,
+              deleted_count: count,
+              title_filter: title_contains,
+              calendar_filter: calFilter || "all",
+              date_filter: date || "any",
+            }, null, 2),
+          }],
+        };
+      }
+
+      case "fantastical_update_event": {
+        const { title_contains, calendar: calFilter, new_title, new_notes } = args as {
+          title_contains: string;
+          calendar?: string;
+          new_title?: string;
+          new_notes?: string;
+        };
+
+        const escapedTitle = title_contains.replace(/"/g, '\\"');
+        const calTarget = calFilter
+          ? `calendar "${calFilter.replace(/"/g, '\\"')}"`
+          : "";
+
+        let setStatements = "";
+        if (new_title) {
+          setStatements += `\n        set summary of evt to "${new_title.replace(/"/g, '\\"')}"`;
+        }
+        if (new_notes !== undefined) {
+          setStatements += `\n        set description of evt to "${(new_notes || "").replace(/"/g, '\\"')}"`;
+        }
+
+        if (!setStatements) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                success: false,
+                message: "No update properties provided (need new_title or new_notes)",
+              }, null, 2),
+            }],
+          };
+        }
+
+        const script = `set updated to false
+set updatedTitle to ""
+tell application "Calendar"
+  ${calFilter ? `tell ${calTarget}` : `repeat with cal in calendars\n    tell cal`}
+    try
+      set matchingEvents to (every event whose summary contains "${escapedTitle}")
+      if (count of matchingEvents) > 0 then
+        set evt to item 1 of matchingEvents${setStatements}
+        set updated to true
+        set updatedTitle to summary of evt
+      end if
+    end try
+  ${calFilter ? `end tell` : `end tell\n    if updated then exit repeat\n  end repeat`}
+  if updated then save
+end tell
+return updated & "|" & updatedTitle`;
+
+        const result = await runAppleScriptFile(script);
+        const [wasUpdated, updatedTitle] = result.split("|");
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              success: wasUpdated === "true",
+              updated_title: updatedTitle || null,
+              title_filter: title_contains,
+              calendar_filter: calFilter || "all",
             }, null, 2),
           }],
         };
@@ -406,7 +668,6 @@ return output`;
 
 // Start the server
 async function main() {
-  // Check if on macOS
   if (process.platform !== "darwin") {
     console.error("Error: This MCP server only works on macOS (Fantastical is macOS-only)");
     process.exit(1);
@@ -414,7 +675,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Fantastical MCP server running");
+  console.error("Fantastical MCP server running (mark-liu fork v1.2.0)");
 }
 
 main().catch((error) => {
