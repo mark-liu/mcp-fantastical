@@ -24,8 +24,24 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { exec } from "child_process";
 import { promisify } from "util";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 const execAsync = promisify(exec);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const NATIVE_HELPER_PATH = join(__dirname, "native", "fantastical-helper");
+
+// Run the Swift EventKit native helper binary
+async function runNativeHelper(args: string[]): Promise<string> {
+  const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+  const cmd = `${NATIVE_HELPER_PATH} ${escapedArgs}`;
+  const { stdout, stderr } = await execAsync(cmd, { timeout: 15000 });
+  if (stderr) {
+    console.error(`Native helper stderr: ${stderr.trim()}`);
+  }
+  return stdout.trim();
+}
 
 // Helper to run single-line AppleScript
 async function runAppleScript(script: string): Promise<string> {
@@ -430,9 +446,8 @@ set rangeEnd to rangeStart + (${days} * days)`;
 tell application "Calendar"
   repeat with cal in calendars
     set calName to name of cal
-    set calId to uid of cal
     set calWritable to writable of cal
-    set output to output & calName & "|" & calId & "|" & calWritable & return
+    set output to output & calName & "|" & calWritable & return
   end repeat
 end tell
 return output`;
@@ -442,8 +457,8 @@ return output`;
           .split("\n")
           .filter(line => line.trim())
           .map(line => {
-            const [calName, id, writable] = line.split("|");
-            return { name: calName, id, writable: writable === "true" };
+            const [calName, writable] = line.split("|");
+            return { name: calName, writable: writable === "true" };
           });
 
         return {
@@ -477,51 +492,9 @@ return output`;
 
       case "fantastical_create_calendar": {
         const { name: calName } = args as { name: string };
-        const escapedName = calName.replace(/"/g, '\\"');
-
-        // Check if calendar already exists
-        const checkScript = `tell application "Calendar"
-  try
-    set c to calendar "${escapedName}"
-    return "EXISTS|" & uid of c
-  on error
-    return "NOT_FOUND"
-  end try
-end tell`;
-        const checkResult = await runAppleScriptFile(checkScript);
-
-        if (checkResult.startsWith("EXISTS")) {
-          const existingId = checkResult.split("|")[1];
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                success: true,
-                message: `Calendar "${calName}" already exists`,
-                calendarId: existingId,
-                created: false,
-              }, null, 2),
-            }],
-          };
-        }
-
-        // Create via Calendar.app AppleScript (creates on default account)
-        const createScript = `tell application "Calendar"
-  set newCal to make new calendar with properties {name:"${escapedName}"}
-  return uid of newCal
-end tell`;
-        const calId = await runAppleScriptFile(createScript);
-
+        const result = await runNativeHelper(["create-calendar", calName]);
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              message: `Calendar "${calName}" created`,
-              calendarId: calId,
-              created: true,
-            }, null, 2),
-          }],
+          content: [{ type: "text", text: result }],
         };
       }
 
@@ -532,59 +505,13 @@ end tell`;
           date?: string;
         };
 
-        const escapedTitle = title_contains.replace(/"/g, '\\"');
-        let dateFilter = "";
-        if (date) {
-          // Parse YYYY-MM-DD and create date bounds
-          dateFilter = `
-set filterDate to current date
-set year of filterDate to ${parseInt(date.substring(0, 4))}
-set month of filterDate to ${parseInt(date.substring(5, 7))}
-set day of filterDate to ${parseInt(date.substring(8, 10))}
-set hours of filterDate to 0
-set minutes of filterDate to 0
-set seconds of filterDate to 0
-set filterEnd to filterDate + (1 * days)`;
-        }
+        const helperArgs = ["delete-event", "--title-contains", title_contains];
+        if (calFilter) { helperArgs.push("--calendar", calFilter); }
+        if (date) { helperArgs.push("--date", date); }
 
-        const calTarget = calFilter
-          ? `calendar "${calFilter.replace(/"/g, '\\"')}"`
-          : "every calendar";
-
-        const dateCondition = date
-          ? ` and start date >= filterDate and start date < filterEnd`
-          : "";
-
-        const script = `set deletedCount to 0
-${dateFilter}
-tell application "Calendar"
-  ${calFilter ? `tell ${calTarget}` : `repeat with cal in calendars\n    tell cal`}
-    try
-      set matchingEvents to (every event whose summary contains "${escapedTitle}"${dateCondition})
-      set deletedCount to deletedCount + (count of matchingEvents)
-      repeat with evt in matchingEvents
-        delete evt
-      end repeat
-    end try
-  ${calFilter ? `end tell` : `end tell\n  end repeat`}
-  save
-end tell
-return deletedCount`;
-
-        const result = await runAppleScriptFile(script);
-        const count = parseInt(result) || 0;
-
+        const result = await runNativeHelper(helperArgs);
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: true,
-              deleted_count: count,
-              title_filter: title_contains,
-              calendar_filter: calFilter || "all",
-              date_filter: date || "any",
-            }, null, 2),
-          }],
+          content: [{ type: "text", text: result }],
         };
       }
 
@@ -596,20 +523,7 @@ return deletedCount`;
           new_notes?: string;
         };
 
-        const escapedTitle = title_contains.replace(/"/g, '\\"');
-        const calTarget = calFilter
-          ? `calendar "${calFilter.replace(/"/g, '\\"')}"`
-          : "";
-
-        let setStatements = "";
-        if (new_title) {
-          setStatements += `\n        set summary of evt to "${new_title.replace(/"/g, '\\"')}"`;
-        }
-        if (new_notes !== undefined) {
-          setStatements += `\n        set description of evt to "${(new_notes || "").replace(/"/g, '\\"')}"`;
-        }
-
-        if (!setStatements) {
+        if (!new_title && new_notes === undefined) {
           return {
             content: [{
               type: "text",
@@ -621,36 +535,14 @@ return deletedCount`;
           };
         }
 
-        const script = `set updated to false
-set updatedTitle to ""
-tell application "Calendar"
-  ${calFilter ? `tell ${calTarget}` : `repeat with cal in calendars\n    tell cal`}
-    try
-      set matchingEvents to (every event whose summary contains "${escapedTitle}")
-      if (count of matchingEvents) > 0 then
-        set evt to item 1 of matchingEvents${setStatements}
-        set updated to true
-        set updatedTitle to summary of evt
-      end if
-    end try
-  ${calFilter ? `end tell` : `end tell\n    if updated then exit repeat\n  end repeat`}
-  if updated then save
-end tell
-return updated & "|" & updatedTitle`;
+        const helperArgs = ["update-event", "--title-contains", title_contains];
+        if (calFilter) { helperArgs.push("--calendar", calFilter); }
+        if (new_title) { helperArgs.push("--new-title", new_title); }
+        if (new_notes !== undefined) { helperArgs.push("--new-notes", new_notes || ""); }
 
-        const result = await runAppleScriptFile(script);
-        const [wasUpdated, updatedTitle] = result.split("|");
-
+        const result = await runNativeHelper(helperArgs);
         return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({
-              success: wasUpdated === "true",
-              updated_title: updatedTitle || null,
-              title_filter: title_contains,
-              calendar_filter: calFilter || "all",
-            }, null, 2),
-          }],
+          content: [{ type: "text", text: result }],
         };
       }
 
