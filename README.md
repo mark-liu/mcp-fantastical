@@ -1,175 +1,142 @@
-# MCP Fantastical Server
+# MCP Fantastical Server (Enhanced Fork)
 
-[![npm version](https://img.shields.io/npm/v/mcp-fantastical.svg)](https://www.npmjs.com/package/mcp-fantastical)
-[![CI](https://github.com/aplaceforallmystuff/mcp-fantastical/actions/workflows/ci.yml/badge.svg)](https://github.com/aplaceforallmystuff/mcp-fantastical/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-blue)](https://modelcontextprotocol.io)
 
-MCP server for [Fantastical](https://flexibits.com/fantastical) - the powerful calendar app for macOS.
+MCP server for [Fantastical](https://flexibits.com/fantastical) and Apple Calendar on macOS. Full CRUD for events and calendars.
 
-## Why Use This?
+**Fork of [aplaceforallmystuff/mcp-fantastical](https://github.com/aplaceforallmystuff/mcp-fantastical)** with additional features:
 
-- **Natural language event creation** - Use Fantastical's powerful natural language parsing ("Meeting with John tomorrow at 3pm")
-- **View your schedule** - Check today's events or upcoming appointments without leaving your conversation
-- **Quick calendar access** - Jump to any date in Fantastical instantly
-- **Calendar-aware AI** - Let Claude understand your availability and schedule context
-- **Zero configuration** - Works with your existing Fantastical and Calendar setup
+- **Calendar CRUD** — create calendars, delete events, update events
+- **Encoding fix** — event creation uses Fantastical AppleScript `parse sentence` instead of URL scheme (fixes `+` encoding bug where spaces appeared as `+` in event titles)
+- **Calendar filter** — filter `get_today` and `get_upcoming` by calendar name
+- **Notes/description** — read event notes in all query results
+- **Enhanced calendar list** — returns calendar IDs and writable status
 
 ## Features
 
-| Category | Capabilities |
-|----------|-------------|
-| **Event Creation** | Create events using natural language, specify calendar, add notes |
-| **Schedule Viewing** | View today's events, upcoming events for any number of days |
-| **Navigation** | Open Fantastical to specific dates |
-| **Search** | Search events by title, location, or notes |
-| **Calendar Management** | List all available calendars |
+| Tool | Description | Type |
+|------|-------------|------|
+| `fantastical_create_event` | Create event via Fantastical natural language | write |
+| `fantastical_get_today` | Today's events (optional calendar filter) | read |
+| `fantastical_get_upcoming` | Upcoming events for N days (optional calendar filter) | read |
+| `fantastical_show_date` | Navigate Fantastical to a date | navigation |
+| `fantastical_get_calendars` | List calendars with IDs and writable status | read |
+| `fantastical_search` | Search events in Fantastical | navigation |
+| `fantastical_create_calendar` | Create a new calendar in Apple Calendar | **write (new)** |
+| `fantastical_delete_event` | Delete events by title match | **destructive (new)** |
+| `fantastical_update_event` | Update event title or notes | **write (new)** |
 
 ## Prerequisites
 
-- macOS (Fantastical is macOS-only)
+- macOS
 - Node.js 18+
-- [Fantastical](https://flexibits.com/fantastical) installed
-- Calendar access permissions for Terminal/Claude
+- [Fantastical](https://flexibits.com/fantastical) installed (for event creation)
+- Calendar.app (for reads, deletes, updates — ships with macOS)
 
 ## Installation
 
-### Using npm (Recommended)
+### From Source (Recommended for Fork)
 
 ```bash
-npx mcp-fantastical
-```
-
-### From Source
-
-```bash
-git clone https://github.com/jmchristian/mcp-fantastical.git
+git clone https://github.com/mark-liu/mcp-fantastical.git
 cd mcp-fantastical
 npm install
 npm run build
 ```
 
-## Configuration
+### Configuration
 
-No API keys required - this server uses AppleScript to communicate with Fantastical and the Calendar app.
-
-### For Claude Desktop
-
-Add to your Claude Desktop config file:
-
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+Add to `~/.claude.json` (Claude Code) or Claude Desktop config:
 
 ```json
 {
   "mcpServers": {
     "fantastical": {
-      "command": "npx",
-      "args": ["-y", "mcp-fantastical"]
+      "command": "node",
+      "args": ["/path/to/mcp-fantastical/dist/index.js"]
     }
   }
 }
 ```
-
-### For Claude Code
-
-Add to `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "fantastical": {
-      "command": "npx",
-      "args": ["-y", "mcp-fantastical"]
-    }
-  }
-}
-```
-
-### Permissions
-
-On first run, you may need to grant accessibility permissions:
-1. System Preferences → Privacy & Security → Accessibility
-2. Add Terminal (or your terminal app) to the allowed list
 
 ## Usage Examples
 
 ### Creating Events
-- "Schedule a meeting with the team tomorrow at 2pm"
-- "Add dentist appointment Friday at 10am to my Personal calendar"
-- "Create a recurring standup every Monday at 9am"
-- "Block off next Tuesday afternoon for deep work"
 
-### Viewing Schedule
-- "What's on my calendar today?"
-- "Show me my schedule for the next week"
-- "What meetings do I have tomorrow?"
-- "Am I free on Friday afternoon?"
+```
+fantastical_create_event(sentence="Meeting with team tomorrow at 2pm", calendar="Work")
+```
 
-### Navigation
-- "Open my calendar to next Monday"
-- "Show me December 25th in Fantastical"
-- "Jump to next week in my calendar"
+The `calendar` parameter appends `/CalendarName` to the Fantastical parse sentence, routing the event to the correct calendar.
 
-### Searching
-- "Find all meetings with Sarah"
-- "Search for dentist appointments"
-- "Look up project review meetings"
+### Creating Calendars
 
-## Available Tools
+```
+fantastical_create_calendar(name="Projects")
+```
 
-| Tool | Description |
-|------|-------------|
-| `fantastical_create_event` | Create an event using natural language parsing |
-| `fantastical_get_today` | Get today's calendar events |
-| `fantastical_get_upcoming` | Get upcoming events for specified number of days |
-| `fantastical_show_date` | Open Fantastical to a specific date |
-| `fantastical_get_calendars` | List all available calendars |
-| `fantastical_search` | Search for events by query |
+Creates a new calendar in Apple Calendar. If the calendar already exists, returns its ID without creating a duplicate.
+
+### Deleting Events
+
+```
+fantastical_delete_event(title_contains="[CHECK] Review", calendar="Claude", date="2026-04-10")
+```
+
+Deletes events matching the title pattern. Optional calendar and date filters narrow the scope.
+
+### Updating Events
+
+```
+fantastical_update_event(title_contains="Weekly standup", calendar="Work", new_notes="Updated agenda")
+```
+
+### Filtering by Calendar
+
+```
+fantastical_get_today(calendar="Claude")
+fantastical_get_upcoming(days=7, calendar="Work")
+```
+
+## Differences from Upstream
+
+| Feature | Upstream (1.1.0) | This Fork (1.2.0) |
+|---------|-----------------|-------------------|
+| Event creation | URL scheme (`x-fantastical3://parse`) | AppleScript `parse sentence` (no encoding bugs) |
+| Calendar filter | No | Yes (`calendar` param on reads) |
+| Event notes | Not returned | Returned in all queries |
+| Calendar list | Name only | Name + ID + writable status |
+| Create calendar | No | Yes |
+| Delete events | No | Yes (by title match) |
+| Update events | No | Yes (title, notes) |
+| Multi-line AppleScript | Inline shell escaping | Temp file execution (safer) |
 
 ## Development
 
 ```bash
-# Watch mode for development
-npm run watch
-
-# Build TypeScript
-npm run build
-
-# Run locally
-node dist/index.js
+npm run build    # Compile TypeScript
+npm run watch    # Watch mode
+node dist/index.js  # Run locally
 ```
 
 ## Troubleshooting
 
 ### "AppleScript error: Not authorized to send Apple events"
-Grant accessibility permissions:
-1. Open System Preferences → Privacy & Security → Accessibility
-2. Click the lock to make changes
-3. Add Terminal (or your terminal app) and enable it
+Grant accessibility permissions: System Preferences > Privacy & Security > Accessibility > add Terminal.
 
-### "Error: This MCP server only works on macOS"
-This server requires macOS because Fantastical is a macOS application. It uses AppleScript to communicate with Fantastical and the Calendar app.
+### Events created with `+` in title
+You're running the upstream version. This fork fixes the encoding by using Fantastical's `parse sentence` AppleScript instead of the URL scheme.
 
-### Events not showing up
-- Ensure Fantastical is syncing with iCloud/Calendar
-- Check that Calendar.app has access to the same calendars
-- Verify the event was created in the correct calendar
-
-### Fantastical not opening
-- Ensure Fantastical is installed
-- Try opening Fantastical manually first
-- Check that URL schemes are enabled in Fantastical preferences
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+### Calendar filter returns empty
+Ensure the calendar name matches exactly (case-sensitive). Use `fantastical_get_calendars` to list available names.
 
 ## License
 
-MIT - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE) for details.
 
-## Links
+## Upstream
 
-- [Fantastical](https://flexibits.com/fantastical) - Official Fantastical website
-- [Model Context Protocol](https://modelcontextprotocol.io) - MCP specification
-- [GitHub Repository](https://github.com/aplaceforallmystuff/mcp-fantastical)
+- [aplaceforallmystuff/mcp-fantastical](https://github.com/aplaceforallmystuff/mcp-fantastical) — original project
+- [Fantastical](https://flexibits.com/fantastical) — calendar app
+- [Model Context Protocol](https://modelcontextprotocol.io) — MCP specification
