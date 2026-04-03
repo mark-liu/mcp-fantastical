@@ -40,6 +40,14 @@ async function runNativeHelper(command: string, arg?: string): Promise<string | 
   }
 }
 
+// Run native helper with full argument list (for CRUD operations)
+async function runNativeHelperArgs(args: string[]): Promise<string> {
+  const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+  const cmd = `${NATIVE_HELPER_PATH} ${escapedArgs}`;
+  const { stdout } = await execAsync(cmd, { timeout: 15000 });
+  return stdout.trim();
+}
+
 // Helper to run AppleScript
 async function runAppleScript(script: string): Promise<string> {
   try {
@@ -170,6 +178,68 @@ const TOOLS: Tool[] = [
         },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "fantastical_create_calendar",
+    description: "Create a new calendar via EventKit. Creates on iCloud if available, otherwise locally. Idempotent — returns existing calendar if name already exists.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name for the new calendar (e.g., 'Projects', 'Automations')",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "fantastical_delete_event",
+    description: "Delete calendar events matching a title pattern via EventKit. Optionally filter by calendar and date.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title_contains: {
+          type: "string",
+          description: "Text that the event title must contain (case-sensitive)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Only delete from this calendar",
+        },
+        date: {
+          type: "string",
+          description: "Optional: Only delete events on this date (YYYY-MM-DD)",
+        },
+      },
+      required: ["title_contains"],
+    },
+  },
+  {
+    name: "fantastical_update_event",
+    description: "Update properties of a calendar event matched by title via EventKit. Updates the first matching event.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title_contains: {
+          type: "string",
+          description: "Text that the event title must contain (matches first found)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Only match events in this calendar",
+        },
+        new_title: {
+          type: "string",
+          description: "Optional: New title for the event",
+        },
+        new_notes: {
+          type: "string",
+          description: "Optional: New notes/description for the event",
+        },
+      },
+      required: ["title_contains"],
     },
   },
 ];
@@ -441,6 +511,48 @@ return output`;
             }, null, 2),
           }],
         };
+      }
+
+      case "fantastical_create_calendar": {
+        const { name: calName } = args as { name: string };
+        const result = await runNativeHelperArgs(["create-calendar", calName]);
+        return { content: [{ type: "text", text: result }] };
+      }
+
+      case "fantastical_delete_event": {
+        const { title_contains, calendar: calFilter, date } = args as {
+          title_contains: string;
+          calendar?: string;
+          date?: string;
+        };
+        const helperArgs = ["delete-event", "--title-contains", title_contains];
+        if (calFilter) { helperArgs.push("--calendar", calFilter); }
+        if (date) { helperArgs.push("--date", date); }
+        const result = await runNativeHelperArgs(helperArgs);
+        return { content: [{ type: "text", text: result }] };
+      }
+
+      case "fantastical_update_event": {
+        const { title_contains, calendar: calFilter, new_title, new_notes } = args as {
+          title_contains: string;
+          calendar?: string;
+          new_title?: string;
+          new_notes?: string;
+        };
+        if (!new_title && new_notes === undefined) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ success: false, message: "No update properties provided (need new_title or new_notes)" }, null, 2),
+            }],
+          };
+        }
+        const helperArgs = ["update-event", "--title-contains", title_contains];
+        if (calFilter) { helperArgs.push("--calendar", calFilter); }
+        if (new_title) { helperArgs.push("--new-title", new_title); }
+        if (new_notes !== undefined) { helperArgs.push("--new-notes", new_notes || ""); }
+        const result = await runNativeHelperArgs(helperArgs);
+        return { content: [{ type: "text", text: result }] };
       }
 
       default:
