@@ -206,23 +206,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           addImmediately?: boolean;
         };
 
-        // Build URL with parameters
-        const params = new URLSearchParams();
-        params.append("s", sentence);
-        if (addImmediately) {
-          params.append("add", "1");
-        }
-        if (calendar) {
-          params.append("calendarName", calendar);
-        }
+        // Use Fantastical AppleScript 'parse sentence' instead of URL scheme.
+        // URLSearchParams encodes spaces as '+' which Fantastical renders
+        // literally in event titles (e.g. "Meeting+with+John+at+3pm").
+        // AppleScript avoids this encoding issue entirely.
+        const calHint = calendar ? ` /${calendar}` : "";
+        const escapedSentence = (sentence + calHint).replace(/"/g, '\\"');
+        const addFlag = addImmediately ? " with add immediately" : "";
+
         if (notes) {
-          params.append("n", notes);
+          const escapedNotes = notes.replace(/"/g, '\\"');
+          // Multi-line AppleScript via temp file to avoid shell escaping issues
+          const fs = await import("fs");
+          const os = await import("os");
+          const path = await import("path");
+          const tmpFile = path.join(os.tmpdir(), `mcp-fantastical-${Date.now()}.scpt`);
+          fs.writeFileSync(tmpFile, `tell application "Fantastical"\n  parse sentence "${escapedSentence}" notes "${escapedNotes}"${addFlag}\nend tell`);
+          try {
+            await execAsync(`osascript "${tmpFile}"`, { timeout: 10000 });
+          } finally {
+            fs.unlinkSync(tmpFile);
+          }
+        } else {
+          await runAppleScript(`tell application "Fantastical" to parse sentence "${escapedSentence}"${addFlag}`);
         }
-
-        const url = `x-fantastical3://parse?${params.toString()}`;
-        const script = `do shell script "open '${url}'"`;
-
-        await runAppleScript(script);
 
         return {
           content: [{
