@@ -114,22 +114,31 @@ const TOOLS: Tool[] = [
   },
   {
     name: "fantastical_get_today",
-    description: "Get today's calendar events from Fantastical",
+    description: "Get today's calendar events. Optionally filter by calendar name. Returns titles, times, locations, and notes.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        calendar: {
+          type: "string",
+          description: "Optional: Filter events to a specific calendar (e.g., 'Work', 'Personal')",
+        },
+      },
       required: [],
     },
   },
   {
     name: "fantastical_get_upcoming",
-    description: "Get upcoming calendar events from Fantastical",
+    description: "Get upcoming calendar events. Optionally filter by calendar name. Returns titles, times, locations, and notes.",
     inputSchema: {
       type: "object" as const,
       properties: {
         days: {
           type: "number",
           description: "Number of days to look ahead (default: 7)",
+        },
+        calendar: {
+          type: "string",
+          description: "Optional: Filter events to a specific calendar (e.g., 'Work', 'Personal')",
         },
       },
       required: [],
@@ -238,18 +247,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "fantastical_get_today": {
+        const { calendar: calFilter } = args as { calendar?: string };
+
         // Try native EventKit helper first (faster, no AppleScript permission issues)
-        const nativeResult = await runNativeHelper("today");
-        if (nativeResult) {
-          return {
-            content: [{
-              type: "text",
-              text: nativeResult,
-            }],
-          };
+        if (!calFilter) {
+          const nativeResult = await runNativeHelper("today");
+          if (nativeResult) {
+            return {
+              content: [{ type: "text", text: nativeResult }],
+            };
+          }
         }
 
-        // Fallback to AppleScript
+        // AppleScript fallback (also used when calendar filter is set)
+        const calBlock = calFilter
+          ? `tell calendar "${calFilter.replace(/"/g, '\\"')}"`
+          : `repeat with cal in calendars\n    set calName to name of cal\n    tell cal`;
+        const calBlockEnd = calFilter ? `end tell` : `end tell\n  end repeat`;
+        const calNameExpr = calFilter ? `"${calFilter.replace(/"/g, '\\"')}"` : `calName`;
+
         const script = `
 set output to ""
 set todayStart to current date
@@ -259,19 +275,27 @@ set seconds of todayStart to 0
 set todayEnd to todayStart + (1 * days)
 
 tell application "Calendar"
-  repeat with cal in calendars
-    set calName to name of cal
+  ${calBlock}
     try
-      set calEvents to (every event of cal whose start date >= todayStart and start date < todayEnd)
+      set calEvents to (every event whose start date >= todayStart and start date < todayEnd)
       repeat with evt in calEvents
         set evtTitle to summary of evt
         set evtStart to start date of evt
         set evtEnd to end date of evt
-        set evtLoc to location of evt
-        set output to output & calName & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "\\n"
+        set evtLoc to ""
+        try
+          set evtLoc to location of evt
+        end try
+        set evtNotes to ""
+        try
+          set evtNotes to description of evt
+        on error
+          set evtNotes to ""
+        end try
+        set output to output & ${calNameExpr} & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "|" & evtNotes & "\\n"
       end repeat
     end try
-  end repeat
+  ${calBlockEnd}
 end tell
 return output`;
 
@@ -280,8 +304,15 @@ return output`;
           .split("\n")
           .filter(line => line.trim())
           .map(line => {
-            const [calendar, title, start, end, location] = line.split("|");
-            return { calendar, title, start, end, location: location || "" };
+            const parts = line.split("|");
+            return {
+              calendar: parts[0] || "",
+              title: parts[1] || "",
+              start: parts[2] || "",
+              end: parts[3] || "",
+              location: parts[4] || "",
+              notes: parts[5] || "",
+            };
           })
           .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
@@ -291,6 +322,7 @@ return output`;
             text: JSON.stringify({
               date: new Date().toISOString().split("T")[0],
               count: events.length,
+              calendar_filter: calFilter || null,
               events,
             }, null, 2),
           }],
@@ -298,22 +330,27 @@ return output`;
       }
 
       case "fantastical_get_upcoming": {
-        const { days = 7 } = args as { days?: number };
+        const { days = 7, calendar: calFilter } = args as { days?: number; calendar?: string };
 
         // Try native EventKit helper first (faster, no AppleScript permission issues)
-        const nativeUpcoming = await runNativeHelper("upcoming", String(days));
-        if (nativeUpcoming) {
-          return {
-            content: [{
-              type: "text",
-              text: nativeUpcoming,
-            }],
-          };
+        if (!calFilter) {
+          const nativeUpcoming = await runNativeHelper("upcoming", String(days));
+          if (nativeUpcoming) {
+            return {
+              content: [{ type: "text", text: nativeUpcoming }],
+            };
+          }
         }
 
-        // Fallback to AppleScript
+        // AppleScript fallback (also used when calendar filter is set)
         const today = new Date();
         const endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() + days);
+
+        const calBlock = calFilter
+          ? `tell calendar "${calFilter.replace(/"/g, '\\"')}"`
+          : `repeat with cal in calendars\n    set calName to name of cal\n    tell cal`;
+        const calBlockEnd = calFilter ? `end tell` : `end tell\n  end repeat`;
+        const calNameExpr = calFilter ? `"${calFilter.replace(/"/g, '\\"')}"` : `calName`;
 
         const script = `
 set output to ""
@@ -324,16 +361,24 @@ set seconds of rangeStart to 0
 set rangeEnd to rangeStart + (${days} * days)
 
 tell application "Calendar"
-  repeat with cal in calendars
-    set calName to name of cal
+  ${calBlock}
     try
-      set calEvents to (every event of cal whose start date >= rangeStart and start date < rangeEnd)
+      set calEvents to (every event whose start date >= rangeStart and start date < rangeEnd)
       repeat with evt in calEvents
         set evtTitle to summary of evt
         set evtStart to start date of evt
         set evtEnd to end date of evt
-        set evtLoc to location of evt
-        set output to output & calName & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "\\n"
+        set evtLoc to ""
+        try
+          set evtLoc to location of evt
+        end try
+        set evtNotes to ""
+        try
+          set evtNotes to description of evt
+        on error
+          set evtNotes to ""
+        end try
+        set output to output & ${calNameExpr} & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "|" & evtNotes & "\\n"
       end repeat
     end try
   end repeat
@@ -345,8 +390,15 @@ return output`;
           .split("\n")
           .filter(line => line.trim())
           .map(line => {
-            const [calendar, title, start, end, location] = line.split("|");
-            return { calendar, title, start, end, location: location || "" };
+            const parts = line.split("|");
+            return {
+              calendar: parts[0] || "",
+              title: parts[1] || "",
+              start: parts[2] || "",
+              end: parts[3] || "",
+              location: parts[4] || "",
+              notes: parts[5] || "",
+            };
           })
           .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
@@ -360,6 +412,7 @@ return output`;
                 days,
               },
               count: events.length,
+              calendar_filter: calFilter || null,
               events,
             }, null, 2),
           }],
