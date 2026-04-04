@@ -301,7 +301,8 @@ tell application "Calendar"
         on error
           set evtNotes to ""
         end try
-        set output to output & ${calNameExpr} & "|" & evtTitle & "|" & (evtStart as string) & "|" & (evtEnd as string) & "|" & evtLoc & "|" & evtNotes & return
+        set delim to (ASCII character 31)
+        set output to output & ${calNameExpr} & delim & evtTitle & delim & (evtStart as string) & delim & (evtEnd as string) & delim & evtLoc & delim & evtNotes & return
       end repeat
     end try
   ${calBlockEnd}
@@ -309,13 +310,13 @@ end tell
 return output`;
 }
 
-// Parse pipe-delimited event output into structured objects
+// Parse unit-separator-delimited event output into structured objects
 function parseEventOutput(result: string) {
   return result
     .split("\n")
     .filter(line => line.trim())
     .map(line => {
-      const parts = line.split("|");
+      const parts = line.split("\x1F");
       return {
         calendar: parts[0] || "",
         title: parts[1] || "",
@@ -453,7 +454,7 @@ tell application "Calendar"
   repeat with cal in calendars
     set calName to name of cal
     set calWritable to writable of cal
-    set output to output & calName & "|" & calWritable & return
+    set output to output & calName & (ASCII character 31) & calWritable & return
   end repeat
 end tell
 return output`;
@@ -463,7 +464,7 @@ return output`;
           .split("\n")
           .filter(line => line.trim())
           .map(line => {
-            const [calName, writable] = line.split("|");
+            const [calName, writable] = line.split("\x1F");
             return { name: calName, writable: writable === "true" };
           });
 
