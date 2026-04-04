@@ -22,21 +22,20 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { exec } from "child_process";
+import { exec, execFile } from "child_process";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const NATIVE_HELPER_PATH = join(__dirname, "native", "fantastical-helper");
 
 // Run the Swift EventKit native helper binary
 async function runNativeHelper(args: string[]): Promise<string> {
-  const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-  const cmd = `${NATIVE_HELPER_PATH} ${escapedArgs}`;
-  const { stdout, stderr } = await execAsync(cmd, { timeout: 15000 });
+  const { stdout, stderr } = await execFileAsync(NATIVE_HELPER_PATH, args, { timeout: 15000 });
   if (stderr) {
     console.error(`Native helper stderr: ${stderr.trim()}`);
   }
