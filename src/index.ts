@@ -33,6 +33,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const NATIVE_HELPER_PATH = join(__dirname, "native", "fantastical-helper");
 
+// Escape a string for safe interpolation inside AppleScript double-quoted strings.
+// Backslashes must be escaped first (before introducing new ones for quotes).
+function escapeAppleScript(str: string): string {
+  return str.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 // Run the Swift EventKit native helper binary
 async function runNativeHelper(args: string[]): Promise<string> {
   const { stdout, stderr } = await execFileAsync(NATIVE_HELPER_PATH, args, { timeout: 15000 });
@@ -265,14 +271,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Build AppleScript for reading events with optional calendar filter and notes
 function buildEventQueryScript(calFilter: string | undefined, dateRangeSetup: string): string {
-  const calBlock = calFilter
-    ? `tell calendar "${calFilter.replace(/"/g, '\\"')}"\n`
+  const safeFilter = calFilter ? escapeAppleScript(calFilter) : undefined;
+  const calBlock = safeFilter
+    ? `tell calendar "${safeFilter}"\n`
     : `repeat with cal in calendars\n    set calName to name of cal\n    tell cal\n`;
-  const calBlockEnd = calFilter
+  const calBlockEnd = safeFilter
     ? `end tell`
     : `end tell\n  end repeat`;
-  const calNameExpr = calFilter
-    ? `"${calFilter.replace(/"/g, '\\"')}"`
+  const calNameExpr = safeFilter
+    ? `"${safeFilter}"`
     : `calName`;
 
   return `set output to ""
@@ -338,17 +345,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Use Fantastical AppleScript 'parse sentence' instead of URL scheme
         // to avoid URLSearchParams encoding spaces as '+' (Fantastical bug)
         const calHint = calendar ? ` /${calendar}` : "";
-        const escapedSentence = (sentence + calHint).replace(/"/g, '\\"');
+        const safeSentence = escapeAppleScript(sentence + calHint);
         const addFlag = addImmediately ? " with add immediately" : "";
 
         let script: string;
         if (notes) {
-          const escapedNotes = notes.replace(/"/g, '\\"');
+          const safeNotes = escapeAppleScript(notes);
           script = `tell application "Fantastical"
-  parse sentence "${escapedSentence}" notes "${escapedNotes}"${addFlag}
+  parse sentence "${safeSentence}" notes "${safeNotes}"${addFlag}
 end tell`;
         } else {
-          script = `tell application "Fantastical" to parse sentence "${escapedSentence}"${addFlag}`;
+          script = `tell application "Fantastical" to parse sentence "${safeSentence}"${addFlag}`;
         }
 
         await runAppleScriptFile(script);
